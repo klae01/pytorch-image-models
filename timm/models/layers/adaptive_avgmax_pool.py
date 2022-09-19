@@ -75,11 +75,27 @@ class AdaptiveCatAvgMaxPool2d(nn.Module):
     def forward(self, x):
         return adaptive_catavgmax_pool2d(x, self.output_size)
 
+class Sort_Pool(nn.Module):
+    def __init__(self, multipler, flatten=True):
+        super().__init__()
+        self.multipler = multipler
+        self.flatten = flatten
+    def forward(self, X):
+        remain_shape = X.shape[:-2]
+        X = X.flatten(-2, -1).flatten(0, -2)
+        X, _ = X.sort(-1)
+        X = nn.functional.adaptive_avg_pool1d(X, self.multipler) / self.multipler
+        X = X.unflatten(0, remain_shape).flatten(-2, -1)
+        if not self.flatten:
+            return X[..., None, None]
+        return X
+    def feat_mult(self):
+        return self.multipler
 
 class SelectAdaptivePool2d(nn.Module):
     """Selectable global pooling layer with dynamic input kernel size
     """
-    def __init__(self, output_size=1, pool_type='fast', flatten=False):
+    def __init__(self, output_size=1, pool_type='fast', flatten=False, multipler=16):
         super(SelectAdaptivePool2d, self).__init__()
         self.pool_type = pool_type or ''  # convert other falsy values to empty string for consistent TS typing
         self.flatten = nn.Flatten(1) if flatten else nn.Identity()
@@ -97,6 +113,9 @@ class SelectAdaptivePool2d(nn.Module):
             self.pool = AdaptiveCatAvgMaxPool2d(output_size)
         elif pool_type == 'max':
             self.pool = nn.AdaptiveMaxPool2d(output_size)
+        elif pool_type == 'sort':
+            assert output_size == 1
+            self.pool = Sort_Pool(multipler, flatten)
         else:
             assert False, 'Invalid pool type: %s' % pool_type
 
@@ -109,6 +128,8 @@ class SelectAdaptivePool2d(nn.Module):
         return x
 
     def feat_mult(self):
+        if self.pool_type == 'sort':
+            return self.pool.feat_mult()
         return adaptive_pool_feat_mult(self.pool_type)
 
     def __repr__(self):
