@@ -9,6 +9,8 @@ Both a functional and a nn.Module version of the pooling is provided.
 
 Hacked together by / Copyright 2020 Ross Wightman
 """
+import re
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -75,11 +77,13 @@ class AdaptiveCatAvgMaxPool2d(nn.Module):
     def forward(self, x):
         return adaptive_catavgmax_pool2d(x, self.output_size)
 
+
 class Sort_Pool(nn.Module):
     def __init__(self, multipler, flatten=True):
         super().__init__()
         self.multipler = multipler
         self.flatten = flatten
+
     def forward(self, X):
         remain_shape = X.shape[:-2]
         X = X.flatten(-2, -1).flatten(0, -2)
@@ -89,13 +93,15 @@ class Sort_Pool(nn.Module):
         if not self.flatten:
             return X[..., None, None]
         return X
+
     def feat_mult(self):
         return self.multipler
+
 
 class SelectAdaptivePool2d(nn.Module):
     """Selectable global pooling layer with dynamic input kernel size
     """
-    def __init__(self, output_size=1, pool_type='fast', flatten=False, multipler=16):
+    def __init__(self, output_size=1, pool_type='fast', flatten=False):
         super(SelectAdaptivePool2d, self).__init__()
         self.pool_type = pool_type or ''  # convert other falsy values to empty string for consistent TS typing
         self.flatten = nn.Flatten(1) if flatten else nn.Identity()
@@ -113,9 +119,13 @@ class SelectAdaptivePool2d(nn.Module):
             self.pool = AdaptiveCatAvgMaxPool2d(output_size)
         elif pool_type == 'max':
             self.pool = nn.AdaptiveMaxPool2d(output_size)
-        elif pool_type == 'sort':
+        elif pool_type.startswith('sort'):
             assert output_size == 1
-            self.pool = Sort_Pool(multipler, flatten)
+            match = re.match("^sort(:(\d+))?$", pool_type)
+            assert match
+            multiplier = int(match.group(2) or 16)
+            assert multiplier > 0
+            self.pool = Sort_Pool(multiplier, flatten)
         else:
             assert False, 'Invalid pool type: %s' % pool_type
 
