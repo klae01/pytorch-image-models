@@ -83,12 +83,13 @@ class Sort_Pool(nn.Module):
         super().__init__()
         self.multipler = multipler
         self.flatten = flatten
+        self.gamma = nn.Parameter(torch.tensor(1 / self.multipler), False)
 
     def forward(self, X):
         remain_shape = X.shape[:-2]
         X = X.flatten(-2, -1).flatten(0, -2)
         X, _ = X.sort(-1)
-        X = nn.functional.adaptive_avg_pool1d(X, self.multipler) / self.multipler
+        X = nn.functional.adaptive_avg_pool1d(X, self.multipler) * self.gamma
         X = X.unflatten(0, remain_shape).flatten(-2, -1)
         if not self.flatten:
             return X[..., None, None]
@@ -138,7 +139,7 @@ class SelectAdaptivePool2d(nn.Module):
         return x
 
     def feat_mult(self):
-        if self.pool_type == 'sort':
+        if isinstance(self.pool, Sort_Pool):
             return self.pool.feat_mult()
         return adaptive_pool_feat_mult(self.pool_type)
 
