@@ -525,7 +525,7 @@ def main():
 
     # setup learning rate schedule and starting epoch
     lr_scheduler, num_steps = create_scheduler(args, optimizer)
-    start_step = 0
+    start_epoch, start_step = 0, 0
     if args.start_step is not None:
         # a specified start_step will always override the resume step
         start_step = args.start_step
@@ -533,7 +533,7 @@ def main():
         start_epoch = resume_epoch
     if lr_scheduler is not None and start_step > 0:
         lr_scheduler.step(start_step)
-        step_counter = cache_iter(itertools.counter(start_step))
+    step_counter = cache_iter(start_step)
 
     if args.local_rank == 0:
         _logger.info('Scheduled steps: {}'.format(num_steps))
@@ -695,6 +695,9 @@ def main():
                 # save proper checkpoint with eval metric
                 save_metric = eval_metrics[eval_metric]
                 best_metric, best_epoch = saver.save_checkpoint(step_counter.value, epoch, metric=save_metric)
+            
+            if step_counter.value == args.steps:
+                break
 
     except KeyboardInterrupt:
         pass
@@ -707,7 +710,7 @@ def train_one_epoch(
         lr_scheduler=None, saver=None, output_dir=None, amp_autocast=suppress,
         loss_scaler=None, model_ema=None, mixup_fn=None):
 
-    if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
+    if args.mixup_off_step and step.value >= args.mixup_off_step:
         if args.prefetcher and loader.mixup_enabled:
             loader.mixup_enabled = False
         elif mixup_fn is not None:
@@ -797,13 +800,15 @@ def train_one_epoch(
 
         if saver is not None and args.recovery_interval and (
                 last_batch or (batch_idx + 1) % args.recovery_interval == 0):
-            saver.save_recovery(epoch, batch_idx=batch_idx)
+            saver.save_recovery(step.value, epoch, batch_idx=batch_idx)
 
         if lr_scheduler is not None:
             lr_scheduler.step(step.value, metric=losses_m.avg)
 
         end = time.time()
         # end for
+        if step.value == args.steps:
+            break
 
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
