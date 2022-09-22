@@ -43,6 +43,7 @@ class CheckpointSaver:
 
         # state
         self.checkpoint_files = []  # (filename, metric) tuples in order of decreasing betterness
+        self.best_step = None
         self.best_epoch = None
         self.best_metric = None
         self.curr_recovery_file = ''
@@ -60,11 +61,11 @@ class CheckpointSaver:
         self.unwrap_fn = unwrap_fn
         assert self.max_history >= 1
 
-    def save_checkpoint(self, epoch, metric=None):
+    def save_checkpoint(self, step, epoch, metric=None):
         assert epoch >= 0
         tmp_save_path = os.path.join(self.checkpoint_dir, 'tmp' + self.extension)
         last_save_path = os.path.join(self.checkpoint_dir, 'last' + self.extension)
-        self._save(tmp_save_path, epoch, metric)
+        self._save(tmp_save_path, step, epoch, metric)
         if os.path.exists(last_save_path):
             os.unlink(last_save_path)  # required for Windows support.
         os.rename(tmp_save_path, last_save_path)
@@ -96,8 +97,9 @@ class CheckpointSaver:
 
         return (None, None) if self.best_metric is None else (self.best_metric, self.best_epoch)
 
-    def _save(self, save_path, epoch, metric=None):
+    def _save(self, save_path, step, epoch, metric=None):
         save_state = {
+            'step': step,
             'epoch': epoch,
             'arch': type(self.model).__name__.lower(),
             'state_dict': get_state_dict(self.model, self.unwrap_fn),
@@ -129,11 +131,11 @@ class CheckpointSaver:
                 _logger.error("Exception '{}' while deleting checkpoint".format(e))
         self.checkpoint_files = self.checkpoint_files[:delete_index]
 
-    def save_recovery(self, epoch, batch_idx=0):
+    def save_recovery(self, step, epoch, batch_idx=0):
         assert epoch >= 0
         filename = '-'.join([self.recovery_prefix, str(epoch), str(batch_idx)]) + self.extension
         save_path = os.path.join(self.recovery_dir, filename)
-        self._save(save_path, epoch)
+        self._save(save_path, step, epoch)
         if os.path.exists(self.last_recovery_file):
             try:
                 _logger.debug("Cleaning recovery: {}".format(self.last_recovery_file))
