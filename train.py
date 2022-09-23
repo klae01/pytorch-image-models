@@ -15,6 +15,7 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 """
 import argparse
+import itertools
 import logging
 import os
 import time
@@ -166,7 +167,7 @@ group.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
 group.add_argument('--lr', type=float, default=0.05, metavar='LR',
                     help='learning rate (default: 0.05)')
 group.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
-                    help='learning rate noise on/off epoch percentages')
+                    help='learning rate noise on/off step percentages')
 group.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
                     help='learning rate noise limit percent (default: 0.67)')
 group.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
@@ -183,22 +184,22 @@ group.add_argument('--warmup-lr', type=float, default=0.0001, metavar='LR',
                     help='warmup learning rate (default: 0.0001)')
 group.add_argument('--min-lr', type=float, default=1e-6, metavar='LR',
                     help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
-group.add_argument('--epochs', type=int, default=300, metavar='N',
-                    help='number of epochs to train (default: 300)')
+group.add_argument('--steps', type=int, default=100000, metavar='N',
+                    help='number of steps to train (default: 300)')
 group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
                     help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
-group.add_argument('--start-epoch', default=None, type=int, metavar='N',
-                    help='manual epoch number (useful on restarts)')
-group.add_argument('--decay-milestones', default=[30, 60], type=int, nargs='+', metavar="MILESTONES",
-                    help='list of decay epoch indices for multistep lr. must be increasing')
-group.add_argument('--decay-epochs', type=float, default=100, metavar='N',
-                    help='epoch interval to decay LR')
-group.add_argument('--warmup-epochs', type=int, default=3, metavar='N',
-                    help='epochs to warmup LR, if scheduler supports')
-group.add_argument('--cooldown-epochs', type=int, default=10, metavar='N',
-                    help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
-group.add_argument('--patience-epochs', type=int, default=10, metavar='N',
-                    help='patience epochs for Plateau LR scheduler (default: 10')
+group.add_argument('--start-step', default=None, type=int, metavar='N',
+                    help='manual step number (useful on restarts)')
+group.add_argument('--decay-milestones', default=[10000, 20000], type=int, nargs='+', metavar="MILESTONES",
+                    help='list of decay step indices for multistep lr. must be increasing')
+group.add_argument('--decay-steps', type=float, default=30000, metavar='N',
+                    help='step interval to decay LR')
+group.add_argument('--warmup-steps', type=int, default=5000, metavar='N',
+                    help='steps to warmup LR, if scheduler supports')
+group.add_argument('--cooldown-steps', type=int, default=3000, metavar='N',
+                    help='steps to cooldown LR at min_lr, after cyclic schedule ends')
+group.add_argument('--patience-steps', type=int, default=3000, metavar='N',
+                    help='patience steps for Plateau LR scheduler (default: 10')
 group.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
                     help='LR decay rate (default: 0.1)')
 
@@ -248,8 +249,8 @@ group.add_argument('--mixup-switch-prob', type=float, default=0.5,
                     help='Probability of switching to cutmix when both mixup and cutmix enabled')
 group.add_argument('--mixup-mode', type=str, default='batch',
                     help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
-group.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
-                    help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
+group.add_argument('--mixup-off-step', default=0, type=int, metavar='N',
+                    help='Turn off mixup after this step, disabled if 0 (default: 0)')
 group.add_argument('--smoothing', type=float, default=0.1,
                     help='Label smoothing (default: 0.1)')
 group.add_argument('--train-interpolation', type=str, default='random',
@@ -327,6 +328,12 @@ group.add_argument('--use-multi-epochs-loader', action='store_true', default=Fal
 group.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
 
+class cache_iter:
+    def __init__(self, start=0, step=1):
+        self.iter = itertools.count(start=0, step=1)
+    def __next__(self):
+        self.value = next(self.iter)
+        return self.value
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -488,7 +495,7 @@ def main():
     # optionally resume from a checkpoint
     resume_epoch = None
     if args.resume:
-        resume_epoch = resume_checkpoint(
+        resume_epoch, resume_step = resume_checkpoint(
             model, args.resume,
             optimizer=None if args.no_resume_opt else optimizer,
             loss_scaler=None if args.no_resume_opt else loss_scaler,
@@ -517,18 +524,19 @@ def main():
         # NOTE: EMA model does not need to be wrapped by DDP
 
     # setup learning rate schedule and starting epoch
-    lr_scheduler, num_epochs = create_scheduler(args, optimizer)
-    start_epoch = 0
-    if args.start_epoch is not None:
-        # a specified start_epoch will always override the resume epoch
-        start_epoch = args.start_epoch
+    lr_scheduler, num_steps = create_scheduler(args, optimizer)
+    start_epoch, start_step = 0, 0
+    if args.start_step is not None:
+        # a specified start_step will always override the resume step
+        start_step = args.start_step
     elif resume_epoch is not None:
         start_epoch = resume_epoch
-    if lr_scheduler is not None and start_epoch > 0:
-        lr_scheduler.step(start_epoch)
+    if lr_scheduler is not None and start_step > 0:
+        lr_scheduler.step(start_step)
+    step_counter = cache_iter(start_step)
 
     if args.local_rank == 0:
-        _logger.info('Scheduled epochs: {}'.format(num_epochs))
+        _logger.info('Scheduled steps: {}'.format(num_steps))
 
     # create the train and eval datasets
     dataset_train = create_dataset(
@@ -655,12 +663,12 @@ def main():
             f.write(args_text)
 
     try:
-        for epoch in range(start_epoch, num_epochs):
+        for epoch in itertools.count(start_epoch):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
 
             train_metrics = train_one_epoch(
-                epoch, model, loader_train, optimizer, train_loss_fn, args,
+                step_counter, epoch, model, loader_train, optimizer, train_loss_fn, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn)
 
@@ -678,10 +686,6 @@ def main():
                     model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
                 eval_metrics = ema_eval_metrics
 
-            if lr_scheduler is not None:
-                # step LR for next epoch
-                lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
-
             if output_dir is not None:
                 utils.update_summary(
                     epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
@@ -690,7 +694,10 @@ def main():
             if saver is not None:
                 # save proper checkpoint with eval metric
                 save_metric = eval_metrics[eval_metric]
-                best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
+                best_metric, best_epoch = saver.save_checkpoint(step_counter.value, epoch, metric=save_metric)
+            
+            if step_counter.value == args.steps:
+                break
 
     except KeyboardInterrupt:
         pass
@@ -699,11 +706,11 @@ def main():
 
 
 def train_one_epoch(
-        epoch, model, loader, optimizer, loss_fn, args,
+        step: cache_iter, epoch, model, loader, optimizer, loss_fn, args,
         lr_scheduler=None, saver=None, output_dir=None, amp_autocast=suppress,
         loss_scaler=None, model_ema=None, mixup_fn=None):
 
-    if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
+    if args.mixup_off_step and step.value >= args.mixup_off_step:
         if args.prefetcher and loader.mixup_enabled:
             loader.mixup_enabled = False
         elif mixup_fn is not None:
@@ -750,6 +757,7 @@ def train_one_epoch(
                     model_parameters(model, exclude_head='agc' in args.clip_mode),
                     value=args.clip_grad, mode=args.clip_mode)
             optimizer.step()
+        next(step)
 
         if model_ema is not None:
             model_ema.update(model)
@@ -792,13 +800,15 @@ def train_one_epoch(
 
         if saver is not None and args.recovery_interval and (
                 last_batch or (batch_idx + 1) % args.recovery_interval == 0):
-            saver.save_recovery(epoch, batch_idx=batch_idx)
+            saver.save_recovery(step.value, epoch, batch_idx=batch_idx)
 
         if lr_scheduler is not None:
-            lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
+            lr_scheduler.step(step.value, metric=losses_m.avg)
 
         end = time.time()
         # end for
+        if step.value == args.steps:
+            break
 
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
