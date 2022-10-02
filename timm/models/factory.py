@@ -33,68 +33,66 @@ def safe_model_name(model_name, remove_source=True):
 
 class WDropout:
     def __init__(self, module: nn.Module):
-        self.module = module
+        module.register_forward_pre_hook(lambda m, a: self.pre_ff(m))
+        module.register_forward_hook(lambda m, a, b: self.post_ff(m))
+        self.temporal_module = module
         self.__WD_params = {}
         self.progress = False
 
     def build_dropout(self, rule, dropout):
-        for n, p in self.module.named_parameters():
+        assert self.temporal_module is not None
+        for n, p in self.temporal_module.named_parameters():
             if p.ndim > 1 and re.match(rule, n):
                 self.__WD_params[n] = dropout
 
-    def get_parent_module(self, name):
+    @staticmethod
+    def get_parent_module(module, name):
         cls_parent = ".".join(name.split(".")[:-1])
         cls_child = name.split(".")[-1]
         if cls_parent:
-            return self.module.get_submodule(cls_parent), cls_child
+            return module.get_submodule(cls_parent), cls_child
         else:
-            return self.module, cls_child
+            return module, cls_child
 
-    def get_parameter(self, name):
-        parent, child = self.get_parent_module(name)
+    @staticmethod
+    def get_parameter(module, name):
+        parent, child = WDropout.get_parent_module(module, name)
         return getattr(parent, child)
 
-    def set_parameter(self, name, new_params):
-        parent, child = self.get_parent_module(name)
+    @staticmethod
+    def set_parameter(module, name, new_params):
+        parent, child = WDropout.get_parent_module(module, name)
         setattr(parent, child, new_params)
 
-    def del_parameter(self, name):
-        parent, child = self.get_parent_module(name)
+    @staticmethod
+    def del_parameter(module, name):
+        parent, child = WDropout.get_parent_module(module, name)
         delattr(parent, child)
 
-    def pre_ff(self):
+    def pre_ff(self, module):
+        self.temporal_module = None
         assert not self.progress
         self.progress = True
-        TR = self.module.training
-        for n, dropout in self.__WD_params.items():
-            w = self.get_parameter(f"{n}")
-            self.set_parameter(f"{n}_raw", w)
-            self.del_parameter(f"{n}")
-            w = torch.nn.functional.dropout(w, dropout, TR)
-            self.set_parameter(f"{n}", w)
+        TR = module.training
+        for n, p in self.__WD_params.items():
+            w = WDropout.get_parameter(module, f"{n}")
+            WDropout.set_parameter(module, f"{n}_raw", w)
+            WDropout.del_parameter(module, f"{n}")
+            w = torch.nn.functional.dropout(w, p, TR)
+            WDropout.set_parameter(module, f"{n}", w)
 
-    def post_ff(self):
+    def post_ff(self, module):
         assert self.progress
         self.progress = False
         for n in self.__WD_params:
-            w = self.get_parameter(f"{n}_raw")
-            self.set_parameter(f"{n}", w)
-            self.del_parameter(f"{n}_raw")
+            w = WDropout.get_parameter(module, f"{n}_raw")
+            WDropout.set_parameter(module, f"{n}", w)
+            WDropout.del_parameter(module, f"{n}_raw")
 
 
 def WDropout_Model(model, dropout):
     WDmodel = WDropout(model)
     WDmodel.build_dropout("^.*$", dropout)
-    original_forward = model.forward
-    def forward(X):
-        nonlocal WDmodel
-        WDmodel.pre_ff()
-        Y = original_forward(X)
-        WDmodel.post_ff()
-        return Y
-
-    setattr(model, "forward", forward)
-
 
 def create_model(
         model_name,
