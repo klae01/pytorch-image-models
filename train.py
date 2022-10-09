@@ -32,7 +32,7 @@ from torch.nn.parallel import DistributedDataParallel as NativeDDP
 from timm import utils
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
 from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, \
-    LabelSmoothingCrossEntropy
+    LabelSmoothingCrossEntropy, Flooding
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, \
     convert_splitbn_model, convert_sync_batchnorm, model_parameters, set_fast_norm
 from timm.optim import create_optimizer_v2, optimizer_kwargs
@@ -253,6 +253,8 @@ group.add_argument('--mixup-off-step', default=0, type=int, metavar='N',
                     help='Turn off mixup after this step, disabled if 0 (default: 0)')
 group.add_argument('--smoothing', type=float, default=0.1,
                     help='Label smoothing (default: 0.1)')
+group.add_argument('--flooding', type=float, default=None,
+                    help='Flooding (default: None)')
 group.add_argument('--train-interpolation', type=str, default='random',
                     help='Training interpolation (random, bilinear, bicubic default: "random")')
 group.add_argument('--drop', type=float, default=0.0, metavar='PCT',
@@ -635,8 +637,8 @@ def main():
         else:
             train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
-        train_loss_fn = nn.CrossEntropyLoss()
-    train_loss_fn = train_loss_fn.cuda()
+        train_loss_fn = nn.CrossEntropyLoss(reduction="none")
+    train_loss_fn = Flooding(train_loss_fn, flooding=args.flooding).cuda()
     validate_loss_fn = nn.CrossEntropyLoss().cuda()
 
     # setup checkpoint saver and eval metric tracking

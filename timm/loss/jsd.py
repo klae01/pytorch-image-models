@@ -21,9 +21,9 @@ class JsdCrossEntropy(nn.Module):
         if smoothing is not None and smoothing > 0:
             self.cross_entropy_loss = LabelSmoothingCrossEntropy(smoothing)
         else:
-            self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+            self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction="none")
 
-    def __call__(self, output, target):
+    def forward(self, output, target):
         split_size = output.shape[0] // self.num_splits
         assert split_size * self.num_splits == output.shape[0]
         logits_split = torch.split(output, split_size)
@@ -34,6 +34,8 @@ class JsdCrossEntropy(nn.Module):
 
         # Clamp mixture distribution to avoid exploding KL divergence
         logp_mixture = torch.clamp(torch.stack(probs).mean(axis=0), 1e-7, 1).log()
-        loss += self.alpha * sum([F.kl_div(
-            logp_mixture, p_split, reduction='batchmean') for p_split in probs]) / len(probs)
+        mix_loss = torch.stack(
+            [F.kl_div(logp_mixture, p_split, reduction="none") for p_split in probs]
+        ).mean(0)
+        loss += self.alpha * mix_loss.flatten(loss.ndim).mean(-1)
         return loss
