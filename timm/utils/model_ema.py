@@ -114,7 +114,11 @@ class ModelEmaV2(nn.Module):
 
     def _update(self, model, update_fn):
         with torch.no_grad():
-            for ema_v, model_v in zip(self.module.state_dict().values(), model.state_dict().values()):
+            ema_sd = self.module.state_dict()
+            mdl_sd = model.state_dict()
+            for m_name in ema_sd.keys():
+                ema_v = ema_sd[m_name]
+                model_v = mdl_sd[m_name]
                 if self.device is not None:
                     model_v = model_v.to(device=self.device)
                 ema_v.copy_(update_fn(ema_v, model_v))
