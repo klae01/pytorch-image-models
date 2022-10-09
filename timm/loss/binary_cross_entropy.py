@@ -15,7 +15,7 @@ class BinaryCrossEntropy(nn.Module):
     """
     def __init__(
             self, smoothing=0.1, target_threshold: Optional[float] = None, weight: Optional[torch.Tensor] = None,
-            reduction: str = 'mean', pos_weight: Optional[torch.Tensor] = None):
+            reduction: str = 'none', pos_weight: Optional[torch.Tensor] = None):
         super(BinaryCrossEntropy, self).__init__()
         assert 0. <= smoothing < 1.0
         self.smoothing = smoothing
