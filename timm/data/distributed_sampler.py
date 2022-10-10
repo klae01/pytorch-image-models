@@ -1,7 +1,10 @@
 import math
+
 import torch
 from torch.utils.data import Sampler
 import torch.distributed as dist
+
+from .resample import class_level_weight
 
 
 class OrderedDistributedSampler(Sampler):
@@ -133,3 +136,46 @@ class RepeatAugSampler(Sampler):
 
     def set_epoch(self, epoch):
         self.epoch = epoch
+
+class ReSampler(Sampler):
+    """Resampling the dataset for by class frequency
+    """
+    def __init__(self, dataset, resample):
+        self.gen = torch.Generator().manual_seed(0)
+        self.dataset = dataset
+
+        self.len = len(dataset)
+        P = torch.tensor(dataset.target_freq())
+        sample_cnt = self.len * class_level_weight(P, resample)
+        margin = sample_cnt - sample_cnt.floor()
+        self.sample_cnt = sample_cnt.floor().long()
+        self.sample_cnt[torch.argsort(-margin)[:self.len - self.sample_cnt.sum()]] += 1
+        self.sample_cnt = self.sample_cnt.numpy().tolist()
+
+        cls = [[] for _ in P]
+        for i in range(self.len):
+            cls[dataset.get_target(i)].append(i)
+        self.num_cls = list(map(len, cls))
+        self.index = torch.tensor([J for I in cls for J in I])
+
+    def __iter__(self):
+        base_index = 0
+        group = []
+        for cls in range(len(self.num_cls)):
+            Q = self.sample_cnt[cls] // self.num_cls[cls]
+            R = self.sample_cnt[cls] % self.num_cls[cls]
+            if Q:
+                group.extend([base_index + torch.arange(self.num_cls[cls])] * Q)
+            if R:
+                group.append(base_index + torch.randperm(self.num_cls[cls], generator=self.gen)[:R])
+            base_index += self.num_cls[cls]
+        S = self.index[torch.cat(group)][torch.randperm(self.len, generator=self.gen)]
+        # count = collections.Counter(map(self.dataset.get_target, S))
+        # assert all(I == count[i] for i, I in enumerate(self.sample_cnt))
+        return iter(S)
+
+    def __len__(self) -> int:
+        return self.len
+    
+    def set_epoch(self, epoch):
+        self.gen = torch.Generator().manual_seed(epoch)

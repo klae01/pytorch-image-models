@@ -15,7 +15,7 @@ import numpy as np
 
 from .transforms_factory import create_transform
 from .constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from .distributed_sampler import OrderedDistributedSampler, RepeatAugSampler
+from .distributed_sampler import OrderedDistributedSampler, RepeatAugSampler, ReSampler
 from .random_erasing import RandomErasing
 from .mixup import FastCollateMixup
 
@@ -194,6 +194,7 @@ def create_loader(
         use_multi_epochs_loader=False,
         persistent_workers=True,
         worker_seeding='all',
+        resample=None,
 ):
     re_num_splits = 0
     if re_split:
@@ -226,15 +227,22 @@ def create_loader(
     if distributed and not isinstance(dataset, torch.utils.data.IterableDataset):
         if is_training:
             if num_aug_repeats:
+                assert resample is None
                 sampler = RepeatAugSampler(dataset, num_repeats=num_aug_repeats)
             else:
-                sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+                if resample is not None:
+                    sampler = ReSampler(dataset, resample=resample)
+                else:
+                    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         else:
             # This will add extra duplicate entries to result in equal num
             # of samples per-process, will slightly alter validation results
+            assert resample is None
             sampler = OrderedDistributedSampler(dataset)
     else:
         assert num_aug_repeats == 0, "RepeatAugment not currently supported in non-distributed or IterableDataset use"
+        if resample is not None:
+            sampler = ReSampler(dataset, resample=resample)
 
     if collate_fn is None:
         collate_fn = fast_collate if use_prefetcher else torch.utils.data.dataloader.default_collate
