@@ -31,6 +31,7 @@ from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
 from timm import utils
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
+from timm.data.resample import sample_level_weight
 from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, \
     LabelSmoothingCrossEntropy, Flooding
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, \
@@ -329,6 +330,8 @@ group.add_argument('--use-multi-epochs-loader', action='store_true', default=Fal
                     help='use the multi-epochs-loader to save time at the beginning of every epoch')
 group.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
+group.add_argument('--resample', type=float, default=None,
+                    help='each sample will resample by the exponent of class frequency. 0 means no resampling and -1 means sampling with equal probability. If it is provided, validation metric only operate as -1')
 
 class cache_iter:
     def __init__(self, start=0, step=1):
@@ -546,12 +549,18 @@ def main():
         class_map=args.class_map,
         download=args.dataset_download,
         batch_size=args.batch_size,
-        repeats=args.epoch_repeats)
+        repeats=args.epoch_repeats,
+        )
     dataset_eval = create_dataset(
         args.dataset, root=args.data_dir, split=args.val_split, is_training=False,
         class_map=args.class_map,
         download=args.dataset_download,
         batch_size=args.batch_size)
+    eval_class_weight = torch.tensor(dataset_eval.target_freq())
+    if args.resample is None:
+        eval_class_weight = torch.ones_like(eval_class_weight)
+    else:
+        eval_class_weight = sample_level_weight(eval_class_weight, args.resample)
 
     # setup mixup / cutmix
     collate_fn = None
@@ -604,6 +613,7 @@ def main():
         pin_memory=args.pin_mem,
         use_multi_epochs_loader=args.use_multi_epochs_loader,
         worker_seeding=args.worker_seeding,
+        resample=args.resample,
     )
 
     loader_eval = create_loader(
@@ -679,13 +689,13 @@ def main():
                     _logger.info("Distributing BatchNorm running means and vars")
                 utils.distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
-            eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
+            eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, cls_weight = eval_class_weight)
 
             if model_ema is not None and not args.model_ema_force_cpu:
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     utils.distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
                 ema_eval_metrics = validate(
-                    model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
+                    model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)', cls_weight = eval_class_weight)
                 eval_metrics = ema_eval_metrics
 
             if output_dir is not None:
@@ -818,19 +828,21 @@ def train_one_epoch(
     return OrderedDict([('loss', losses_m.avg)])
 
 
-def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):
+def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='', *, cls_weight):
     batch_time_m = utils.AverageMeter()
     losses_m = utils.AverageMeter()
     top1_m = utils.AverageMeter()
     top5_m = utils.AverageMeter()
 
     model.eval()
+    cls_weight = cls_weight.cuda()
 
     end = time.time()
     last_idx = len(loader) - 1
     with torch.no_grad():
         for batch_idx, (input, target) in enumerate(loader):
             last_batch = batch_idx == last_idx
+            weight = cls_weight[target]
             if not args.prefetcher:
                 input = input.cuda()
                 target = target.cuda()
@@ -847,9 +859,10 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
             if reduce_factor > 1:
                 output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
                 target = target[0:target.size(0):reduce_factor]
+                weight = weight[0:weight.size(0):reduce_factor]
 
             loss = loss_fn(output, target)
-            acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+            acc1, acc5 = utils.accuracy(output, target, weight / weight.mean(), topk=(1, 5))
 
             if args.distributed:
                 reduced_loss = utils.reduce_tensor(loss.data, args.world_size)
@@ -860,9 +873,10 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
 
             torch.cuda.synchronize()
 
-            losses_m.update(reduced_loss.item(), input.size(0))
-            top1_m.update(acc1.item(), output.size(0))
-            top5_m.update(acc5.item(), output.size(0))
+            W = weight.sum().item()
+            losses_m.update(reduced_loss.item(), W)
+            top1_m.update(acc1.item(), W)
+            top5_m.update(acc5.item(), W)
 
             batch_time_m.update(time.time() - end)
             end = time.time()

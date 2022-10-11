@@ -1,7 +1,9 @@
 """ Quick n Simple Image Folder, Tarfile based DataSet
 
-Hacked together by / Copyright 2019, Ross Wightman
+Hacked together by / Copyright 2019, Ross Wightman, klae01
 """
+import collections
+
 import torch.utils.data as data
 import os
 import torch
@@ -16,6 +18,11 @@ _logger = logging.getLogger(__name__)
 
 _ERROR_RETRY = 50
 
+
+def get_frequency(Items, num_types):
+    Size = len(Items)
+    Freq = collections.Counter(Items)
+    return [Freq[i] / Size for i in range(num_types)]
 
 class ImageDataset(data.Dataset):
 
@@ -35,6 +42,15 @@ class ImageDataset(data.Dataset):
         self.transform = transform
         self.target_transform = target_transform
         self._consecutive_errors = 0
+    
+    def target_freq(self):
+        if not hasattr(self, "cls_freq"):
+            cls_gen = [I for _, I in self.parser]
+            self.cls_freq = get_frequency(cls_gen, max(cls_gen) + 1)
+        return self.cls_freq
+    
+    def get_target(self, index):
+        return self.parser[index][1]
 
     def __getitem__(self, index):
         img, target = self.parser[index]
